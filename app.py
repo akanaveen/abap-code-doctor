@@ -22,13 +22,57 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-MODEL = "openai/gpt-oss-120b"
+MODEL         = "openai/gpt-oss-120b"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-API_KEY = os.getenv("GROQ_API_KEY")
+# API key: Streamlit Cloud secrets -> .env fallback
+try:
+    API_KEY = st.secrets["GROQ_API_KEY"]
+except (KeyError, FileNotFoundError):
+    API_KEY = os.getenv("GROQ_API_KEY", "")
+
+# App password: Streamlit Cloud secrets -> .env fallback
+try:
+    APP_PASSWORD = st.secrets["APP_PASSWORD"]
+except (KeyError, FileNotFoundError):
+    APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+
+# Password gate — only active when APP_PASSWORD is set
+if APP_PASSWORD:
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+
+    if not st.session_state["authenticated"]:
+        st.markdown(
+            """
+            <div style='max-width:360px; margin:10vh auto; text-align:center'>
+                <div style='font-size:2.8rem'>&#x1F9FA;</div>
+                <h2 style='margin-bottom:4px'>ABAP Code Doctor</h2>
+                <p style='color:#6b7280; margin-bottom:24px'>
+                    Enter the access password to continue.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        col_l, col_c, col_r = st.columns([1, 2, 1])
+        with col_c:
+            pwd_input = st.text_input(
+                "Password",
+                type="password",
+                label_visibility="collapsed",
+                placeholder="Password",
+            )
+            if st.button("Enter", use_container_width=True, type="primary"):
+                if pwd_input == APP_PASSWORD:
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password.")
+        st.stop()
 
 if not API_KEY:
-    st.error("GROQ_API_KEY is missing. Add it to your .env file.")
+    st.error("GROQ_API_KEY is missing. Add it to Streamlit secrets or your .env file.")
     st.stop()
 
 client = OpenAI(
@@ -886,6 +930,17 @@ def local_abap_scan(code):
 
     for match in re.finditer(r"/\s*0(?:\b|\.)", scan_code, re.IGNORECASE):
         line = line_from_offset(scan_code, match.start())
+
+        # Skip WRITE: /0 or WRITE /05 output formatting
+        _lt = lines[line - 1].strip()
+        if re.match(r"\bWRITE\b", _lt, re.IGNORECASE):
+            continue
+        # Must have a value/variable before the slash (arithmetic context)
+        _before = scan_code[max(0, match.start() - 80): match.start()]
+        _before_line = _before.split("\n")[-1]
+        if not re.search(r"[\w\).]\s*$", _before_line):
+            continue
+
         add(
             "LOGIC_DIVISION_BY_ZERO", "Logic / Runtime Safety", "Critical",
             "Division by literal zero",
@@ -914,6 +969,29 @@ def local_abap_scan(code):
     for match in div_var_pattern.finditer(scan_code):
         var  = match.group("var")
         line = line_from_offset(scan_code, match.start())
+
+        # Skip false positives
+        line_text = lines[line - 1].strip()
+
+        # 1. WRITE: / or WRITE / — new-line output operator, not division
+        if re.match(r"\bWRITE\b", line_text, re.IGNORECASE):
+            continue
+
+        # 2. ULINE / SKIP / FORMAT / output-layout keywords use / differently
+        if re.match(r"\b(ULINE|SKIP|FORMAT|AT|NEW-LINE|NEW-PAGE)\b",
+                    line_text, re.IGNORECASE):
+            continue
+
+        # 3. SAP namespace slash e.g. /BIC/MYFIELD — not division
+        if re.match(r"^/[A-Za-z]", match.group(0)):
+            continue
+
+        # 4. Must have a value/variable/closing-paren immediately before the /
+        #    on the same line — otherwise it is not an arithmetic division
+        before_slash = scan_code[max(0, match.start() - 80): match.start()]
+        before_on_line = before_slash.split("\n")[-1]
+        if not re.search(r"[\w\).]\s*$", before_on_line):
+            continue
 
         preceding_block = "\n".join(lines[max(0, line - 8): line - 1])
         guarded = bool(re.search(
