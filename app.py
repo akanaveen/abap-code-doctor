@@ -22,9 +22,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Use llama-3.3-70b-versatile — widely available on Groq free tier
-# and reliably supports JSON mode. Change here to switch models globally.
-MODEL         = "llama-3.3-70b-versatile"
+# openai/gpt-oss-120b is Groq's current recommended model (June 2026+).
+# llama-3.3-70b-versatile was deprecated by Groq on August 16 2026.
+MODEL         = "openai/gpt-oss-120b"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 # API key: Streamlit Cloud secrets -> .env fallback
@@ -90,10 +90,9 @@ client = OpenAI(
 # minute cannot blow the limit.
 # ============================================================
 
-# Groq free tier: 12 000 tokens/min for llama-3.3-70b-versatile
-# gpt-oss-120b has the same RPM but lower daily cap (1000 req/day).
+# Groq free tier: openai/gpt-oss-120b — 8 000 tokens/min, 30 RPM, 1 000 req/day
 # Keep output caps generous so JSON responses are never truncated.
-TPM_LIMIT          = 12_000  # Groq free tier TPM for llama-3.3-70b-versatile
+TPM_LIMIT          = 8_000   # Groq free tier TPM for openai/gpt-oss-120b
 ANALYSIS_MAX_OUT   = 2_400   # output cap for analysis call
 FIX_MAX_OUT        = 2_800   # output cap for fix call
 PROMPT_SAFETY_PAD  = 300     # buffer for system messages + overhead
