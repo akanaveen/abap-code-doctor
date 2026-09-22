@@ -1302,30 +1302,102 @@ def local_abap_scan(code):
 
         nearby = scan_code[match.end(): min(len(scan_code), match.end() + 1800)]
 
-        return_match = re.search(
-            r"\bRETURN\s*=\s*DATA\(([^)]+)\)", nearby, re.IGNORECASE,
+        # Find the end of this CALL FUNCTION statement (next dot
+        # not inside a string) so we know what parameters were mapped.
+        stmt_end_match = re.search(r"\.\s*$|\.", nearby, re.MULTILINE)
+        stmt_body = nearby[: stmt_end_match.end()] if stmt_end_match else nearby[:400]
+
+        # ── Case 1: RETURN = DATA(lt_xxx)  — inline declaration ──
+        return_inline = re.search(
+            r"\bRETURN\s*=\s*DATA\(([^)]+)\)", stmt_body, re.IGNORECASE,
         )
 
-        if return_match:
-            return_name  = return_match.group(1)
-            after_return = nearby[return_match.end():]
+        # ── Case 2: RETURN = lt_xxx  — existing table ─────────────
+        return_existing = re.search(
+            r"\bRETURN\s*=\s*@?(?!DATA\()(?P<var>[A-Za-z_][A-Za-z0-9_]*)",
+            stmt_body, re.IGNORECASE,
+        )
+
+        # ── Case 3: RETURN not mapped at all ──────────────────────
+        return_mapped = bool(return_inline or return_existing)
+
+        if not return_mapped:
+            # RETURN table completely absent — errors are invisible
+            add(
+                "BAPI_RETURN_IGNORED", "BAPI / Error Handling", "High",
+                "BAPI called without mapping the RETURN parameter",
+                (
+                    f"{bapi_name} is called but the RETURN parameter is not mapped. "
+                    "Any errors, warnings or messages reported by the BAPI are silently lost."
+                ),
+                (
+                    "Add a RETURN table parameter, evaluate it after the call, "
+                    "and handle error/warning messages before committing."
+                ),
+                line,
+                existing_code=extract_lines(code, line, min(len(lines), line + 10)),
+                recommended_code=(
+                    f"DATA lt_return TYPE TABLE OF bapiret2.\n\n"
+                    f"CALL FUNCTION '{bapi_name}'\n"
+                    f"  EXPORTING ...\n"
+                    f"  TABLES\n"
+                    f"    return = lt_return.\n\n"
+                    f"READ TABLE lt_return INTO DATA(ls_err)\n"
+                    f"  WITH KEY type = 'E'.\n"
+                    f"IF sy-subrc = 0.\n"
+                    f"  MESSAGE ls_err-message TYPE 'E'.\n"
+                    f"ENDIF."
+                ),
+                confidence="High",
+                why_it_matters=(
+                    "Without a RETURN table the program cannot detect BAPI errors "
+                    "and will silently continue or commit even when the BAPI failed."
+                ),
+            )
+        else:
+            # RETURN is mapped — check whether it is actually evaluated afterward
+            return_name = (
+                return_inline.group(1) if return_inline
+                else return_existing.group("var")
+            )
+            after_return = nearby[
+                (return_inline or return_existing).end():
+            ]
 
             return_checked = bool(
-                re.search(rf"\bLOOP\s+AT\s+{re.escape(return_name)}\b", after_return, re.IGNORECASE)
-                or re.search(rf"\bREAD\s+TABLE\s+{re.escape(return_name)}\b", after_return, re.IGNORECASE)
-                or re.search(rf"\bIF\b.*?\b{re.escape(return_name)}\b", after_return, re.IGNORECASE | re.DOTALL)
+                re.search(rf"\bLOOP\s+AT\s+{re.escape(return_name)}\b",
+                          after_return, re.IGNORECASE)
+                or re.search(rf"\bREAD\s+TABLE\s+{re.escape(return_name)}\b",
+                             after_return, re.IGNORECASE)
+                or re.search(rf"\bIF\b.*?\b{re.escape(return_name)}\b",
+                             after_return, re.IGNORECASE | re.DOTALL)
+                or re.search(rf"\bLINES\(\s*{re.escape(return_name)}\s*\)\b",
+                             after_return, re.IGNORECASE)
             )
 
             if not return_checked:
                 add(
                     "BAPI_RETURN_IGNORED", "BAPI / Error Handling", "High",
                     "BAPI return messages are not evaluated",
-                    f"{bapi_name} populates {return_name}, but the returned messages are not visibly evaluated.",
-                    "Evaluate the BAPI return messages and handle errors before committing.",
+                    (
+                        f"{bapi_name} maps its RETURN parameter to '{return_name}', "
+                        "but the table is not visibly evaluated after the call."
+                    ),
+                    "Loop through the RETURN table, check for E/A type messages and handle errors before committing.",
                     line,
                     existing_code=extract_lines(code, line, min(len(lines), line + 12)),
+                    recommended_code=(
+                        f"READ TABLE {return_name} INTO DATA(ls_err)\n"
+                        f"  WITH KEY type = 'E'.\n"
+                        f"IF sy-subrc = 0.\n"
+                        f"  MESSAGE ls_err-message TYPE 'E'.\n"
+                        f"ENDIF."
+                    ),
                     confidence="High",
-                    why_it_matters="The program can continue or commit even when the BAPI reports an error.",
+                    why_it_matters=(
+                        "The program can continue or commit even when the BAPI "
+                        "reports an error in the RETURN table."
+                    ),
                 )
 
     # --------------------------------------------------------
