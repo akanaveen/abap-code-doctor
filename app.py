@@ -22,7 +22,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-MODEL         = "openai/gpt-oss-120b"
+# Use llama-3.3-70b-versatile — widely available on Groq free tier
+# and reliably supports JSON mode. Change here to switch models globally.
+MODEL         = "llama-3.3-70b-versatile"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 # API key: Streamlit Cloud secrets -> .env fallback
@@ -88,8 +90,11 @@ client = OpenAI(
 # minute cannot blow the limit.
 # ============================================================
 
-TPM_LIMIT          = 8_000   # hard Groq limit (tokens / minute)
-ANALYSIS_MAX_OUT   = 1_800   # output cap for analysis call
+# Groq free tier: 12 000 tokens/min for llama-3.3-70b-versatile
+# gpt-oss-120b has the same RPM but lower daily cap (1000 req/day).
+# Keep output caps generous so JSON responses are never truncated.
+TPM_LIMIT          = 12_000  # Groq free tier TPM for llama-3.3-70b-versatile
+ANALYSIS_MAX_OUT   = 2_400   # output cap for analysis call
 FIX_MAX_OUT        = 2_800   # output cap for fix call
 PROMPT_SAFETY_PAD  = 300     # buffer for system messages + overhead
 
@@ -2037,15 +2042,31 @@ def analyze_abap(code):
 
     budget_check(estimated_input, ANALYSIS_MAX_OUT, "Analysis")
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "You are a strict SAP ABAP code reviewer. Return only valid JSON."},
-            {"role": "user",   "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-        max_tokens=ANALYSIS_MAX_OUT,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "You are a strict SAP ABAP code reviewer. Return only valid JSON."},
+                {"role": "user",   "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=ANALYSIS_MAX_OUT,
+        )
+    except Exception as exc:
+        err = str(exc)
+        if "json_validate_failed" in err or "Failed to validate JSON" in err:
+            raise ValueError(
+                "The model could not fit its response within the token limit and returned "
+                "incomplete JSON. Try analyzing a smaller section of the code, or the source "
+                "may be too large for the current token budget."
+            ) from exc
+        if "model_not_found" in err or "does not exist" in err.lower():
+            raise ValueError(
+                f"Model '{MODEL}' is not available on your Groq API key. "
+                "Update the MODEL constant in app.py to a model available on your account "
+                "(e.g. llama-3.3-70b-versatile)."
+            ) from exc
+        raise
 
     raw = response.choices[0].message.content
     if not raw:
@@ -2059,7 +2080,13 @@ def analyze_abap(code):
             cleaned = cleaned[7:]
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3]
-        ai_result = json.loads(cleaned.strip())
+        try:
+            ai_result = json.loads(cleaned.strip())
+        except json.JSONDecodeError:
+            raise ValueError(
+                "The AI returned malformed JSON. This usually means the response was "
+                "truncated mid-output. Try a smaller ABAP source or increase ANALYSIS_MAX_OUT."
+            )
 
     if not isinstance(ai_result, dict):
         raise ValueError("AI response was not a JSON object.")
